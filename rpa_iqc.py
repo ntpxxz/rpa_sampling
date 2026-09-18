@@ -1,13 +1,13 @@
 """
 IQC RPA — EHLLAPI (no OCR)
-Polls iqc_queue from MSSQL, drives DEQ05161 → item list → DEQ05171 → DEQ05172
+Polls iqc_queue from MSSQL, drives DEQ05161 → DEQ05162 → DEQ05171 → DEQ05172
 
 ⚠  Needs Python 32-bit — ehlapi32.dll is 32-bit only
    Run: C:\path\to\python32\python.exe rpa_iqc.py
 
 Flow per record:
   1. DEQ05161  — type INVOICE_NO at INVOICE NO field → Enter
-  2. List      — find row with ITEM_NO → type X → Enter
+  2. DEQ05162  — find row with ITEM_NO → type X → Enter  (SELECT TO ENTRY list)
   3. DEQ05171  — verify, Enter
   4. DEQ05172  — type VISUAL_RESULT, DIM_RESULT → Enter (CHECK)
 """
@@ -413,11 +413,11 @@ def screen_deq05161_input_invoice(invoice_no: str):
         press_enter(1.0)
 
 
-def screen_list_select_item(item_no: str, invoice_no: str):
-    """Item list — find row with both ITEM_NO and INVOICE_NO, type X → Enter.
+def screen_deq05162_select_item(item_no: str, invoice_no: str):
+    """DEQ05162 (SELECT TO ENTRY list) — find row with both ITEM_NO and INVOICE_NO, type X → Enter.
     Same ITEM_NO can appear on multiple rows (different invoices) so both must match.
     """
-    ps = wait_screen("SELECT TO ENTRY", label="IQC item list")
+    ps = wait_screen("SELECT TO ENTRY", label="DEQ05162")
     _, cols = _screen_dims
     rows_text = [ps[i * cols:(i + 1) * cols] for i in range(_screen_dims[0])]
 
@@ -431,14 +431,14 @@ def screen_list_select_item(item_no: str, invoice_no: str):
         # Fallback: item_no only (warn — may pick wrong row if duplicates)
         matches = [i + 1 for i, row in enumerate(rows_text) if item_no.upper() in row.upper()]
         if not matches:
-            log.error("[LIST] screen dump:\n%s", "\n".join(rows_text))
+            log.error("[DEQ05162] screen dump:\n%s", "\n".join(rows_text))
             raise ValueError(f"ITEM_NO {item_no!r} / INVOICE_NO {invoice_no!r} not found on list screen")
-        log.warning("[LIST] invoice suffix %r not found on same row — using item_no match only (row %d)", inv_suffix, matches[0])
+        log.warning("[DEQ05162] invoice suffix %r not found on same row — using item_no match only (row %d)", inv_suffix, matches[0])
     if len(matches) > 1:
-        log.warning("[LIST] %d rows match item+invoice — picking first (row %d)", len(matches), matches[0])
+        log.warning("[DEQ05162] %d rows match item+invoice — picking first (row %d)", len(matches), matches[0])
 
     row_num = matches[0]
-    log.info("[LIST] item %s invoice %s at row %d — selecting X", item_no, invoice_no, row_num)
+    log.info("[DEQ05162] item %s invoice %s at row %d — selecting X", item_no, invoice_no, row_num)
     type_at(row_num, LIST_OPT_COL, "X")
     press_enter(1.5)
 
@@ -497,7 +497,7 @@ def input_to_as400(record: dict):
     if not record["ITEM_NO"]:
         raise ValueError("record missing ITEM_NO")
     screen_deq05161_input_invoice(record["INVOICE_NO"])
-    screen_list_select_item(record["ITEM_NO"], record["INVOICE_NO"])
+    screen_deq05162_select_item(record["ITEM_NO"], record["INVOICE_NO"])
     screen_deq05171_verify(record)
     screen_deq05172_enter_result(record)
     log.info("done: invoice=%s item=%s", record["INVOICE_NO"], record["ITEM_NO"])
