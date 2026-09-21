@@ -289,62 +289,32 @@ def update_warehouse_inbound(invoice_no: str, item_no: str):
 def ensure_table():
     with _db() as conn:
         conn.execute("""
-            IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='iqc_queue' AND xtype='U')
-            CREATE TABLE iqc_queue (
-                id                  INT IDENTITY PRIMARY KEY,
-                INVOICE_NO          NVARCHAR(50)  NOT NULL,
-                ITEM_NO             NVARCHAR(50)  NULL,
-                MODEL_NAME          NVARCHAR(100) NULL,
-                REV                 NVARCHAR(20)  NULL,
-                MATLOT              NVARCHAR(50)  NULL,
-                LOT_IQC             NVARCHAR(50)  NULL,
-                VISUAL_QTY          INT           NULL,
-                VISUAL_GOOD_QTY     INT           NULL,
-                VISUAL_NG_QTY       INT           NULL,
-                VISUAL_RESULT       NVARCHAR(1)   NULL DEFAULT 'A',
-                DIM_QTY             INT           NULL,
-                DIM_GOOD_QTY        INT           NULL,
-                DIM_NG_QTY          INT           NULL,
-                DIM_RESULT          NVARCHAR(1)   NULL DEFAULT 'A',
-                SKIP_LOT_NO         NVARCHAR(50)  NULL,
-                INSPECTION_TIME     DATETIME2     NULL,
-                INSPECTION_OPERATOR NVARCHAR(100) NULL,
-                AQL_LEVEL           NVARCHAR(20)  NULL,
-                OSA_NO              NVARCHAR(50)  NULL,
-                REMARK              NVARCHAR(MAX) NULL,
-                screen_text         NVARCHAR(MAX) NULL,
-                status              NVARCHAR(30)  NOT NULL DEFAULT 'PENDING_INPUT',
-                error               NVARCHAR(MAX) NULL,
-                created_at          DATETIME2     NOT NULL DEFAULT GETUTCDATE(),
-                updated_at          DATETIME2     NOT NULL DEFAULT GETUTCDATE()
-            )
-        """)
-        conn.execute("""
             IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='iqc_result' AND xtype='U')
             CREATE TABLE iqc_result (
                 id                  INT IDENTITY PRIMARY KEY,
-                queue_id            INT           NOT NULL,
-                INVOICE_NO          NVARCHAR(50)  NOT NULL,
-                ITEM_NO             NVARCHAR(50)  NULL,
-                MODEL_NAME          NVARCHAR(100) NULL,
-                REV                 NVARCHAR(20)  NULL,
-                MATLOT              NVARCHAR(50)  NULL,
-                LOT_IQC             NVARCHAR(50)  NULL,
-                VISUAL_QTY          INT           NULL,
-                VISUAL_GOOD_QTY     INT           NULL,
-                VISUAL_NG_QTY       INT           NULL,
-                VISUAL_RESULT       NVARCHAR(1)   NULL,
-                DIM_QTY             INT           NULL,
-                DIM_GOOD_QTY        INT           NULL,
-                DIM_NG_QTY          INT           NULL,
-                DIM_RESULT          NVARCHAR(1)   NULL,
-                SKIP_LOT_NO         NVARCHAR(50)  NULL,
-                INSPECTION_TIME     DATETIME2     NULL,
-                INSPECTION_OPERATOR NVARCHAR(100) NULL,
-                AQL_LEVEL           NVARCHAR(20)  NULL,
-                OSA_NO              NVARCHAR(50)  NULL,
-                REMARK              NVARCHAR(MAX) NULL,
-                completed_at        DATETIME2     NOT NULL DEFAULT GETUTCDATE()
+                task_id             INT           NOT NULL,
+                invoiceNo           NVARCHAR(50)  NOT NULL,
+                partNo              NVARCHAR(50)  NULL,
+                partName            NVARCHAR(100) NULL,
+                rev                 NVARCHAR(20)  NULL,
+                lotNo               NVARCHAR(50)  NULL,
+                lotIqc              NVARCHAR(50)  NULL,
+                visualQty           INT           NULL,
+                visualGoodQty       INT           NULL,
+                visualNgQty         INT           NULL,
+                visualResult        NVARCHAR(1)   NULL,
+                dimQty              INT           NULL,
+                dimGoodQty          INT           NULL,
+                dimNgQty            INT           NULL,
+                dimResult           NVARCHAR(1)   NULL,
+                skipLotNo           NVARCHAR(50)  NULL,
+                inspectionTime      DATETIME2     NULL,
+                inspectionOperator  NVARCHAR(100) NULL,
+                aql                 NVARCHAR(20)  NULL,
+                osaNо               NVARCHAR(50)  NULL,
+                remark              NVARCHAR(MAX) NULL,
+                error               NVARCHAR(MAX) NULL,
+                completedAt         DATETIME2     NOT NULL DEFAULT GETUTCDATE()
             )
         """)
         conn.commit()
@@ -352,56 +322,20 @@ def ensure_table():
 
 
 def reset_schema():
-    """Drop and recreate iqc_queue + iqc_result. Use once after schema changes."""
+    """Drop and recreate iqc_result. Use once after schema changes."""
     with _db() as conn:
         conn.execute("IF OBJECT_ID('iqc_result','U') IS NOT NULL DROP TABLE iqc_result")
-        conn.execute("IF OBJECT_ID('iqc_queue', 'U') IS NOT NULL DROP TABLE iqc_queue")
         conn.commit()
     ensure_table()
     log.info("schema reset complete")
 
 
-def sync_from_inbound():
-    """Pull IQC_WAITING rows from Warehouse_F5.inbound_task into iqc_queue as PENDING_INPUT.
-    Updates inbound_task status to IQC_QUEUED for each pulled row."""
-    with _wh_db() as wh, _db() as iq:
-        rows = wh.execute(
-            "SELECT INVOICE_NO, ITEM_NO, MODEL_NAME, REV, MATLOT "
-            "FROM inbound_task WHERE status='IQC_WAITING'"
-        ).fetchall()
-        inserted = 0
-        for r in rows:
-            exists = iq.execute(
-                "SELECT 1 FROM iqc_queue WHERE INVOICE_NO=? AND ITEM_NO=? "
-                "AND status NOT IN ('IQC_COMPLETE','FAILED')",
-                r[0], r[1]
-            ).fetchone()
-            if not exists:
-                iq.execute(
-                    "INSERT INTO iqc_queue (INVOICE_NO, ITEM_NO, MODEL_NAME, REV, MATLOT) "
-                    "VALUES (?,?,?,?,?)",
-                    r[0], r[1], r[2], r[3], r[4]
-                )
-                wh.execute(
-                    "UPDATE inbound_task SET status='IQC_QUEUED' "
-                    "WHERE INVOICE_NO=? AND ITEM_NO=?",
-                    r[0], r[1]
-                )
-                inserted += 1
-        iq.commit()
-        wh.commit()
-    if inserted:
-        log.info("sync_from_inbound: %d new row(s) added", inserted)
-
-
 def fetch_pending():
     with _db() as conn:
         rows = conn.execute(
-            "SELECT id, INVOICE_NO, ITEM_NO, MODEL_NAME, REV, MATLOT, LOT_IQC, "
-            "       VISUAL_QTY, VISUAL_GOOD_QTY, VISUAL_NG_QTY, VISUAL_RESULT, "
-            "       DIM_QTY, DIM_GOOD_QTY, DIM_NG_QTY, DIM_RESULT, "
-            "       SKIP_LOT_NO, INSPECTION_TIME, INSPECTION_OPERATOR, AQL_LEVEL, OSA_NO, REMARK "
-            "FROM iqc_queue WHERE status='IQC_WAITING' ORDER BY created_at"
+            "SELECT id, invoiceNo, partNo, partName, rev, lotNo, "
+            "       totalSampling, aql, assignedTo, receiverNote "
+            "FROM task WHERE status='IQC_WAITING' ORDER BY createdAt"
         ).fetchall()
     return [{
         "id":                 r[0],
@@ -410,42 +344,42 @@ def fetch_pending():
         "MODEL_NAME":         r[3] or "",
         "REV":                r[4] or "",
         "MATLOT":             r[5] or "",
-        "LOT_IQC":            r[6] or "",
-        "VISUAL_QTY":         r[7],
-        "VISUAL_GOOD_QTY":    r[8],
-        "VISUAL_NG_QTY":      r[9],
-        "VISUAL_RESULT":      r[10] or "A",
-        "DIM_QTY":            r[11],
-        "DIM_GOOD_QTY":       r[12],
-        "DIM_NG_QTY":         r[13],
-        "DIM_RESULT":         r[14] or "A",
-        "SKIP_LOT_NO":        r[15] or "",
-        "INSPECTION_TIME":    r[16],
-        "INSPECTION_OPERATOR":r[17] or "",
-        "AQL_LEVEL":          r[18] or "",
-        "OSA_NO":             r[19] or "",
-        "REMARK":             r[20] or "",
+        "LOT_IQC":            "",
+        "VISUAL_QTY":         r[6],
+        "VISUAL_GOOD_QTY":    None,
+        "VISUAL_NG_QTY":      None,
+        "VISUAL_RESULT":      "A",
+        "DIM_QTY":            r[6],
+        "DIM_GOOD_QTY":       None,
+        "DIM_NG_QTY":         None,
+        "DIM_RESULT":         "A",
+        "SKIP_LOT_NO":        "",
+        "INSPECTION_TIME":    None,
+        "INSPECTION_OPERATOR":r[8] or "",
+        "AQL_LEVEL":          r[7] or "",
+        "OSA_NO":             "",
+        "REMARK":             r[9] or "",
     } for r in rows]
 
 
 def mark_processing(row_id: int):
     with _db() as conn:
         conn.execute(
-            "UPDATE iqc_queue SET status='PROCESSING', updated_at=GETUTCDATE() WHERE id=?",
+            "UPDATE task SET status='IQC_PROCESSING', startedAt=GETUTCDATE(), updatedAt=GETUTCDATE() WHERE id=?",
             row_id
         )
         conn.commit()
 
 
-def insert_iqc_result(record: dict):
+def insert_iqc_result(record: dict, error: str = None):
     with _db() as conn:
         conn.execute(
             "INSERT INTO iqc_result "
-            "(queue_id, INVOICE_NO, ITEM_NO, MODEL_NAME, REV, MATLOT, LOT_IQC, "
-            " VISUAL_QTY, VISUAL_GOOD_QTY, VISUAL_NG_QTY, VISUAL_RESULT, "
-            " DIM_QTY, DIM_GOOD_QTY, DIM_NG_QTY, DIM_RESULT, "
-            " SKIP_LOT_NO, INSPECTION_TIME, INSPECTION_OPERATOR, AQL_LEVEL, OSA_NO, REMARK) "
-            "VALUES (?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?,?,?)",
+            "(task_id, invoiceNo, partNo, partName, rev, lotNo, lotIqc, "
+            " visualQty, visualGoodQty, visualNgQty, visualResult, "
+            " dimQty, dimGoodQty, dimNgQty, dimResult, "
+            " skipLotNo, inspectionTime, inspectionOperator, aql, osaNо, remark, error) "
+            "VALUES (?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?,?,?,?)",
             record["id"], record["INVOICE_NO"], record["ITEM_NO"] or None,
             record["MODEL_NAME"] or None, record["REV"] or None,
             record["MATLOT"] or None, record["LOT_IQC"] or None,
@@ -455,22 +389,22 @@ def insert_iqc_result(record: dict):
             record["DIM_RESULT"],
             record["SKIP_LOT_NO"] or None, record["INSPECTION_TIME"],
             record["INSPECTION_OPERATOR"] or None, record["AQL_LEVEL"] or None,
-            record["OSA_NO"] or None, record["REMARK"] or None,
+            record["OSA_NO"] or None, record["REMARK"] or None, error,
         )
         conn.commit()
 
 
-def mark_done(row_id: int, status: str, error: str = None, invoice_no: str = None):
+def mark_done(row_id: int, status: str, invoice_no: str = None):
     with _db() as conn:
+        finished = "finishedAt=GETUTCDATE(), " if status == "IQC_COMPLETE" else ""
         conn.execute(
-            "UPDATE iqc_queue SET status=?, error=?, updated_at=GETUTCDATE() WHERE id=?",
-            status, error, row_id
+            f"UPDATE task SET status=?, {finished}updatedAt=GETUTCDATE() WHERE id=?",
+            status, row_id
         )
         if status == "IQC_COMPLETE" and invoice_no:
-            # Mark all remaining IQC_WAITING rows for the same invoice complete
             conn.execute(
-                "UPDATE iqc_queue SET status='IQC_COMPLETE', updated_at=GETUTCDATE() "
-                "WHERE INVOICE_NO=? AND status='IQC_WAITING'",
+                "UPDATE task SET status='IQC_COMPLETE', finishedAt=GETUTCDATE(), updatedAt=GETUTCDATE() "
+                "WHERE invoiceNo=? AND status='IQC_WAITING'",
                 invoice_no
             )
         conn.commit()
@@ -479,8 +413,8 @@ def mark_done(row_id: int, status: str, error: str = None, invoice_no: str = Non
 def mark_awaiting_confirm(row_id: int, screen_text: str):
     with _db() as conn:
         conn.execute(
-            "UPDATE iqc_queue SET status='AWAITING_CONFIRM', screen_text=?, updated_at=GETUTCDATE() WHERE id=?",
-            screen_text, row_id
+            "UPDATE task SET status='AWAITING_CONFIRM', updatedAt=GETUTCDATE() WHERE id=?",
+            row_id
         )
         conn.commit()
     log.info("AWAITING_CONFIRM id=%d", row_id)
@@ -488,7 +422,7 @@ def mark_awaiting_confirm(row_id: int, screen_text: str):
 
 def get_queue_status(row_id: int) -> str:
     with _db() as conn:
-        row = conn.execute("SELECT status FROM iqc_queue WHERE id=?", row_id).fetchone()
+        row = conn.execute("SELECT status FROM task WHERE id=?", row_id).fetchone()
     return row[0] if row else "FAILED"
 
 
@@ -691,7 +625,8 @@ def process_record(record: dict):
         log.info("IQC_COMPLETE: %s / %s", record["INVOICE_NO"], record["ITEM_NO"])
     except Exception as e:
         log.error("ERROR: %s / %s — %s", record["INVOICE_NO"], record["ITEM_NO"], e)
-        mark_done(record["id"], "FAILED", str(e))
+        insert_iqc_result(record, error=str(e))
+        mark_done(record["id"], "FAILED")
         ctypes.windll.user32.MessageBoxW(
             0,
             f"INVOICE: {record['INVOICE_NO']}  ITEM: {record['ITEM_NO']}\n\n{e}\n\nRecord marked FAILED.",
@@ -701,7 +636,6 @@ def process_record(record: dict):
 
 
 def poll():
-    sync_from_inbound()
     pending = fetch_pending()
     if not pending:
         log.debug("no pending records")
@@ -712,12 +646,11 @@ def poll():
 
 
 def purge_iqc_data():
-    """Truncate iqc_queue and iqc_result; leave user table intact."""
+    """Delete all iqc_result rows; leaves task table intact."""
     with _db() as conn:
         conn.execute("DELETE FROM iqc_result")
-        conn.execute("DELETE FROM iqc_queue")
         conn.commit()
-    log.info("purge complete — iqc_queue and iqc_result cleared")
+    log.info("purge complete — iqc_result cleared")
 
 
 def main():
