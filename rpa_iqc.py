@@ -277,7 +277,7 @@ def update_warehouse_inbound(invoice_no: str, item_no: str):
         with _wh_db() as conn:
             rows = conn.execute(
                 "UPDATE inbound_task SET status='IQC_COMPLETE' "
-                "WHERE INVOICE_NO=? AND ITEM_NO=?",
+                "WHERE invoice=? AND part=?",
                 invoice_no, item_no
             ).rowcount
             conn.commit()
@@ -333,13 +333,13 @@ def reset_schema():
 def fetch_pending():
     with _db() as conn:
         rows = conn.execute(
-            "SELECT t.id, t.invoiceNo, t.partNo, t.partName, t.rev, t.lotNo, "
+            "SELECT t.id, t.invoice, t.part, t.model, t.rev, t.lotNo, "
             "       r.lotIqc, r.visualQty, r.visualGoodQty, r.visualNgQty, r.visualResult, "
             "       r.dimQty, r.dimGoodQty, r.dimNgQty, r.dimResult, "
             "       r.skipLotNo, r.inspectionTime, r.inspectionOperator, r.aql, r.osaNо, r.remark "
             "FROM task t "
             "JOIN iqc_result r ON r.task_id = t.id AND r.completedAt IS NULL "
-            "WHERE t.status = 'IQC_WAITING' "
+            "WHERE t.iqcStatus = 'IQC_WAITING' "
             "ORDER BY t.createdAt"
         ).fetchall()
     return [{
@@ -370,7 +370,7 @@ def fetch_pending():
 def mark_processing(row_id: int):
     with _db() as conn:
         conn.execute(
-            "UPDATE task SET status='IQC_PROCESSING', startedAt=GETUTCDATE(), updatedAt=GETUTCDATE() WHERE id=?",
+            "UPDATE task SET iqcStatus='IQC_PROCESSING', updatedAt=GETUTCDATE() WHERE id=?",
             row_id
         )
         conn.commit()
@@ -389,15 +389,14 @@ def complete_iqc_result(task_id: int, error: str = None):
 
 def mark_done(row_id: int, status: str, invoice_no: str = None):
     with _db() as conn:
-        finished = "finishedAt=GETUTCDATE(), " if status == "IQC_COMPLETE" else ""
         conn.execute(
-            f"UPDATE task SET status=?, {finished}updatedAt=GETUTCDATE() WHERE id=?",
+            "UPDATE task SET iqcStatus=?, updatedAt=GETUTCDATE() WHERE id=?",
             status, row_id
         )
         if status == "IQC_COMPLETE" and invoice_no:
             conn.execute(
-                "UPDATE task SET status='IQC_COMPLETE', finishedAt=GETUTCDATE(), updatedAt=GETUTCDATE() "
-                "WHERE invoiceNo=? AND status='IQC_WAITING'",
+                "UPDATE task SET iqcStatus='IQC_COMPLETE', updatedAt=GETUTCDATE() "
+                "WHERE invoice=? AND iqcStatus='IQC_WAITING'",
                 invoice_no
             )
         conn.commit()
@@ -406,7 +405,7 @@ def mark_done(row_id: int, status: str, invoice_no: str = None):
 def mark_awaiting_confirm(row_id: int, screen_text: str):
     with _db() as conn:
         conn.execute(
-            "UPDATE task SET status='AWAITING_CONFIRM', updatedAt=GETUTCDATE() WHERE id=?",
+            "UPDATE task SET iqcStatus='AWAITING_CONFIRM', updatedAt=GETUTCDATE() WHERE id=?",
             row_id
         )
         conn.commit()
@@ -415,7 +414,7 @@ def mark_awaiting_confirm(row_id: int, screen_text: str):
 
 def get_queue_status(row_id: int) -> str:
     with _db() as conn:
-        row = conn.execute("SELECT status FROM task WHERE id=?", row_id).fetchone()
+        row = conn.execute("SELECT iqcStatus FROM task WHERE id=?", row_id).fetchone()
     return row[0] if row else "FAILED"
 
 
