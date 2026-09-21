@@ -23,7 +23,7 @@ log = logging.getLogger("rpa-iqc")
 
 # ── Config ────────────────────────────────────────────────────────────────────
 DB_SERVER      = os.getenv("DB_SERVER",     "localhost")
-DB_NAME        = os.getenv("DB_NAME",       "")
+DB_NAME        = os.getenv("DB_NAME",       "IQC_DB")
 DB_USER        = os.getenv("DB_USER",       "")
 DB_PASSWORD    = os.getenv("DB_PASSWORD",   "")
 POLL_INTERVAL  = int(os.getenv("POLL_INTERVAL", "5"))
@@ -264,39 +264,138 @@ def ensure_table():
         conn.execute("""
             IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='iqc_queue' AND xtype='U')
             CREATE TABLE iqc_queue (
-                id              INT IDENTITY PRIMARY KEY,
-                INVOICE_NO      NVARCHAR(50),
-                ITEM_NO         NVARCHAR(50),
-                VISUAL_RESULT   NVARCHAR(1)   DEFAULT 'A',
-                DIM_RESULT      NVARCHAR(1)   DEFAULT 'A',
-                screen_text     NVARCHAR(MAX) NULL,
-                status          NVARCHAR(20)  DEFAULT 'PENDING',
-                error           NVARCHAR(MAX) NULL,
-                created_at      DATETIME2     DEFAULT GETUTCDATE(),
-                updated_at      DATETIME2     DEFAULT GETUTCDATE()
+                id                  INT IDENTITY PRIMARY KEY,
+                INVOICE_NO          NVARCHAR(50)  NOT NULL,
+                ITEM_NO             NVARCHAR(50)  NULL,        -- OSA No. (optional, special request)
+                MODEL_NAME          NVARCHAR(100) NULL,
+                REV                 NVARCHAR(20)  NULL,
+                VISUAL_QTY          INT           NULL,
+                VISUAL_GOOD_QTY     INT           NULL,
+                VISUAL_NG_QTY       INT           NULL,
+                VISUAL_RESULT       NVARCHAR(1)   NULL DEFAULT 'A',
+                DIM_QTY             INT           NULL,
+                DIM_GOOD_QTY        INT           NULL,
+                DIM_NG_QTY          INT           NULL,
+                DIM_RESULT          NVARCHAR(1)   NULL DEFAULT 'A',
+                SKIP_LOT_NO         NVARCHAR(50)  NULL,
+                INSPECTION_TIME     DATETIME2     NULL,
+                INSPECTION_OPERATOR NVARCHAR(100) NULL,
+                AQL_LEVEL           NVARCHAR(20)  NULL,
+                OSA_NO              NVARCHAR(50)  NULL,
+                REMARK              NVARCHAR(MAX) NULL,
+                screen_text         NVARCHAR(MAX) NULL,
+                status              NVARCHAR(30)  NOT NULL DEFAULT 'IQC_WAITING',
+                error               NVARCHAR(MAX) NULL,
+                created_at          DATETIME2     NOT NULL DEFAULT GETUTCDATE(),
+                updated_at          DATETIME2     NOT NULL DEFAULT GETUTCDATE()
+            )
+        """)
+        conn.execute("""
+            IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='iqc_result' AND xtype='U')
+            CREATE TABLE iqc_result (
+                id                  INT IDENTITY PRIMARY KEY,
+                queue_id            INT           NOT NULL,
+                INVOICE_NO          NVARCHAR(50)  NOT NULL,
+                ITEM_NO             NVARCHAR(50)  NULL,
+                MODEL_NAME          NVARCHAR(100) NULL,
+                REV                 NVARCHAR(20)  NULL,
+                VISUAL_QTY          INT           NULL,
+                VISUAL_GOOD_QTY     INT           NULL,
+                VISUAL_NG_QTY       INT           NULL,
+                VISUAL_RESULT       NVARCHAR(1)   NULL,
+                DIM_QTY             INT           NULL,
+                DIM_GOOD_QTY        INT           NULL,
+                DIM_NG_QTY          INT           NULL,
+                DIM_RESULT          NVARCHAR(1)   NULL,
+                SKIP_LOT_NO         NVARCHAR(50)  NULL,
+                INSPECTION_TIME     DATETIME2     NULL,
+                INSPECTION_OPERATOR NVARCHAR(100) NULL,
+                AQL_LEVEL           NVARCHAR(20)  NULL,
+                OSA_NO              NVARCHAR(50)  NULL,
+                REMARK              NVARCHAR(MAX) NULL,
+                completed_at        DATETIME2     NOT NULL DEFAULT GETUTCDATE()
             )
         """)
         conn.commit()
-    log.info("DB table ready")
+    log.info("DB tables ready (IQC_DB)")
 
 
 def fetch_pending():
     with _db() as conn:
         rows = conn.execute(
-            "SELECT id, INVOICE_NO, ITEM_NO, VISUAL_RESULT, DIM_RESULT "
-            "FROM iqc_queue WHERE status='PENDING' ORDER BY created_at"
+            "SELECT id, INVOICE_NO, ITEM_NO, MODEL_NAME, REV, "
+            "       VISUAL_QTY, VISUAL_GOOD_QTY, VISUAL_NG_QTY, VISUAL_RESULT, "
+            "       DIM_QTY, DIM_GOOD_QTY, DIM_NG_QTY, DIM_RESULT, "
+            "       SKIP_LOT_NO, INSPECTION_TIME, INSPECTION_OPERATOR, AQL_LEVEL, OSA_NO, REMARK "
+            "FROM iqc_queue WHERE status='IQC_WAITING' ORDER BY created_at"
         ).fetchall()
-    return [{"id": r[0], "INVOICE_NO": r[1] or "", "ITEM_NO": r[2] or "",
-             "VISUAL_RESULT": r[3] or "A", "DIM_RESULT": r[4] or "A"}
-            for r in rows]
+    return [{
+        "id":                 r[0],
+        "INVOICE_NO":         r[1] or "",
+        "ITEM_NO":            r[2] or "",
+        "MODEL_NAME":         r[3] or "",
+        "REV":                r[4] or "",
+        "VISUAL_QTY":         r[5],
+        "VISUAL_GOOD_QTY":    r[6],
+        "VISUAL_NG_QTY":      r[7],
+        "VISUAL_RESULT":      r[8] or "A",
+        "DIM_QTY":            r[9],
+        "DIM_GOOD_QTY":       r[10],
+        "DIM_NG_QTY":         r[11],
+        "DIM_RESULT":         r[12] or "A",
+        "SKIP_LOT_NO":        r[13] or "",
+        "INSPECTION_TIME":    r[14],
+        "INSPECTION_OPERATOR":r[15] or "",
+        "AQL_LEVEL":          r[16] or "",
+        "OSA_NO":             r[17] or "",
+        "REMARK":             r[18] or "",
+    } for r in rows]
 
 
-def mark_done(row_id: int, status: str, error: str = None):
+def mark_processing(row_id: int):
+    with _db() as conn:
+        conn.execute(
+            "UPDATE iqc_queue SET status='PROCESSING', updated_at=GETUTCDATE() WHERE id=?",
+            row_id
+        )
+        conn.commit()
+
+
+def insert_iqc_result(record: dict):
+    with _db() as conn:
+        conn.execute(
+            "INSERT INTO iqc_result "
+            "(queue_id, INVOICE_NO, ITEM_NO, MODEL_NAME, REV, "
+            " VISUAL_QTY, VISUAL_GOOD_QTY, VISUAL_NG_QTY, VISUAL_RESULT, "
+            " DIM_QTY, DIM_GOOD_QTY, DIM_NG_QTY, DIM_RESULT, "
+            " SKIP_LOT_NO, INSPECTION_TIME, INSPECTION_OPERATOR, AQL_LEVEL, OSA_NO, REMARK) "
+            "VALUES (?,?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?,?,?)",
+            record["id"], record["INVOICE_NO"], record["ITEM_NO"] or None,
+            record["MODEL_NAME"] or None, record["REV"] or None,
+            record["VISUAL_QTY"], record["VISUAL_GOOD_QTY"], record["VISUAL_NG_QTY"],
+            record["VISUAL_RESULT"],
+            record["DIM_QTY"], record["DIM_GOOD_QTY"], record["DIM_NG_QTY"],
+            record["DIM_RESULT"],
+            record["SKIP_LOT_NO"] or None, record["INSPECTION_TIME"],
+            record["INSPECTION_OPERATOR"] or None, record["AQL_LEVEL"] or None,
+            record["OSA_NO"] or None, record["REMARK"] or None,
+        )
+        conn.commit()
+
+
+def mark_done(row_id: int, status: str, error: str = None, invoice_no: str = None):
     with _db() as conn:
         conn.execute(
             "UPDATE iqc_queue SET status=?, error=?, updated_at=GETUTCDATE() WHERE id=?",
             status, error, row_id
         )
+        if status == "IQC_COMPLETE" and invoice_no:
+            # Mark all remaining IQC_WAITING rows for the same invoice complete
+            conn.execute(
+                "UPDATE iqc_queue SET status='IQC_COMPLETE', updated_at=GETUTCDATE() "
+                "WHERE INVOICE_NO=? AND status='IQC_WAITING'",
+                invoice_no
+            )
         conn.commit()
 
 
@@ -506,10 +605,12 @@ def input_to_as400(record: dict):
 # ── Main loop ────────────────────────────────────────────────────────────────
 
 def process_record(record: dict):
+    mark_processing(record["id"])
     try:
         input_to_as400(record)
-        mark_done(record["id"], "SENT")
-        log.info("SENT: %s / %s", record["INVOICE_NO"], record["ITEM_NO"])
+        insert_iqc_result(record)
+        mark_done(record["id"], "IQC_COMPLETE", invoice_no=record["INVOICE_NO"])
+        log.info("IQC_COMPLETE: %s / %s", record["INVOICE_NO"], record["ITEM_NO"])
     except Exception as e:
         log.error("ERROR: %s / %s — %s", record["INVOICE_NO"], record["ITEM_NO"], e)
         mark_done(record["id"], "FAILED", str(e))
