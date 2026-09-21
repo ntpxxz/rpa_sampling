@@ -314,7 +314,7 @@ def ensure_table():
                 osaNо               NVARCHAR(50)  NULL,
                 remark              NVARCHAR(MAX) NULL,
                 error               NVARCHAR(MAX) NULL,
-                completedAt         DATETIME2     NOT NULL DEFAULT GETUTCDATE()
+                completedAt         DATETIME2     NULL
             )
         """)
         conn.commit()
@@ -333,9 +333,14 @@ def reset_schema():
 def fetch_pending():
     with _db() as conn:
         rows = conn.execute(
-            "SELECT id, invoiceNo, partNo, partName, rev, lotNo, "
-            "       totalSampling, aql, assignedTo, receiverNote "
-            "FROM task WHERE status='IQC_WAITING' ORDER BY createdAt"
+            "SELECT t.id, t.invoiceNo, t.partNo, t.partName, t.rev, t.lotNo, "
+            "       r.lotIqc, r.visualQty, r.visualGoodQty, r.visualNgQty, r.visualResult, "
+            "       r.dimQty, r.dimGoodQty, r.dimNgQty, r.dimResult, "
+            "       r.skipLotNo, r.inspectionTime, r.inspectionOperator, r.aql, r.osaNо, r.remark "
+            "FROM task t "
+            "JOIN iqc_result r ON r.task_id = t.id AND r.completedAt IS NULL "
+            "WHERE t.status = 'IQC_WAITING' "
+            "ORDER BY t.createdAt"
         ).fetchall()
     return [{
         "id":                 r[0],
@@ -344,21 +349,21 @@ def fetch_pending():
         "MODEL_NAME":         r[3] or "",
         "REV":                r[4] or "",
         "MATLOT":             r[5] or "",
-        "LOT_IQC":            "",
-        "VISUAL_QTY":         r[6],
-        "VISUAL_GOOD_QTY":    None,
-        "VISUAL_NG_QTY":      None,
-        "VISUAL_RESULT":      "A",
-        "DIM_QTY":            r[6],
-        "DIM_GOOD_QTY":       None,
-        "DIM_NG_QTY":         None,
-        "DIM_RESULT":         "A",
-        "SKIP_LOT_NO":        "",
-        "INSPECTION_TIME":    None,
-        "INSPECTION_OPERATOR":r[8] or "",
-        "AQL_LEVEL":          r[7] or "",
-        "OSA_NO":             "",
-        "REMARK":             r[9] or "",
+        "LOT_IQC":            r[6] or "",
+        "VISUAL_QTY":         r[7],
+        "VISUAL_GOOD_QTY":    r[8],
+        "VISUAL_NG_QTY":      r[9],
+        "VISUAL_RESULT":      r[10] or "A",
+        "DIM_QTY":            r[11],
+        "DIM_GOOD_QTY":       r[12],
+        "DIM_NG_QTY":         r[13],
+        "DIM_RESULT":         r[14] or "A",
+        "SKIP_LOT_NO":        r[15] or "",
+        "INSPECTION_TIME":    r[16],
+        "INSPECTION_OPERATOR":r[17] or "",
+        "AQL_LEVEL":          r[18] or "",
+        "OSA_NO":             r[19] or "",
+        "REMARK":             r[20] or "",
     } for r in rows]
 
 
@@ -371,25 +376,13 @@ def mark_processing(row_id: int):
         conn.commit()
 
 
-def insert_iqc_result(record: dict, error: str = None):
+def complete_iqc_result(task_id: int, error: str = None):
+    """Mark the pre-filled iqc_result row as completed by RPA."""
     with _db() as conn:
         conn.execute(
-            "INSERT INTO iqc_result "
-            "(task_id, invoiceNo, partNo, partName, rev, lotNo, lotIqc, "
-            " visualQty, visualGoodQty, visualNgQty, visualResult, "
-            " dimQty, dimGoodQty, dimNgQty, dimResult, "
-            " skipLotNo, inspectionTime, inspectionOperator, aql, osaNо, remark, error) "
-            "VALUES (?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?,?,?,?)",
-            record["id"], record["INVOICE_NO"], record["ITEM_NO"] or None,
-            record["MODEL_NAME"] or None, record["REV"] or None,
-            record["MATLOT"] or None, record["LOT_IQC"] or None,
-            record["VISUAL_QTY"], record["VISUAL_GOOD_QTY"], record["VISUAL_NG_QTY"],
-            record["VISUAL_RESULT"],
-            record["DIM_QTY"], record["DIM_GOOD_QTY"], record["DIM_NG_QTY"],
-            record["DIM_RESULT"],
-            record["SKIP_LOT_NO"] or None, record["INSPECTION_TIME"],
-            record["INSPECTION_OPERATOR"] or None, record["AQL_LEVEL"] or None,
-            record["OSA_NO"] or None, record["REMARK"] or None, error,
+            "UPDATE iqc_result SET completedAt=GETUTCDATE(), error=? "
+            "WHERE task_id=? AND completedAt IS NULL",
+            error, task_id
         )
         conn.commit()
 
@@ -619,13 +612,13 @@ def process_record(record: dict):
     mark_processing(record["id"])
     try:
         input_to_as400(record)
-        insert_iqc_result(record)
+        complete_iqc_result(record["id"])
         mark_done(record["id"], "IQC_COMPLETE", invoice_no=record["INVOICE_NO"])
         update_warehouse_inbound(record["INVOICE_NO"], record["ITEM_NO"])
         log.info("IQC_COMPLETE: %s / %s", record["INVOICE_NO"], record["ITEM_NO"])
     except Exception as e:
         log.error("ERROR: %s / %s — %s", record["INVOICE_NO"], record["ITEM_NO"], e)
-        insert_iqc_result(record, error=str(e))
+        complete_iqc_result(record["id"], error=str(e))
         mark_done(record["id"], "FAILED")
         ctypes.windll.user32.MessageBoxW(
             0,
