@@ -3,7 +3,7 @@ IQC RPA — EHLLAPI (no OCR)
 Polls iqc_queue from MSSQL, drives DEQ05161 → DEQ05162 → DEQ05171 → DEQ05172
 
 ⚠  Needs Python 32-bit — ehlapi32.dll is 32-bit only
-   Run: C:\path\to\python32\python.exe rpa_iqc.py
+   Run: C:/path/to/python32/python.exe rpa_iqc.py
 
 Flow per record:
   1. DEQ05161  — type INVOICE_NO at INVOICE NO field → Enter
@@ -271,18 +271,19 @@ def _wh_db():
     return pyodbc.connect(_WH_CONN_STR, autocommit=False)
 
 
-def update_warehouse_inbound(invoice_no: str):
-    """Best-effort: update inbound_task.status in Warehouse_F5. Logs on failure, never raises."""
+def update_warehouse_inbound(invoice_no: str, item_no: str):
+    """Best-effort: mark exact inbound_task row IQC_COMPLETE. Logs on failure, never raises."""
     try:
         with _wh_db() as conn:
             rows = conn.execute(
-                "UPDATE inbound_task SET status='IQC_COMPLETE' WHERE INVOICE_NO=?",
-                invoice_no
+                "UPDATE inbound_task SET status='IQC_COMPLETE' "
+                "WHERE INVOICE_NO=? AND ITEM_NO=?",
+                invoice_no, item_no
             ).rowcount
             conn.commit()
-        log.info("[WH] inbound_task updated %d row(s) for invoice %s", rows, invoice_no)
+        log.info("[WH] inbound_task updated %d row(s) for %s / %s", rows, invoice_no, item_no)
     except Exception as e:
-        log.warning("[WH] warehouse update failed for invoice %s — %s", invoice_no, e)
+        log.warning("[WH] warehouse update failed for %s / %s — %s", invoice_no, item_no, e)
 
 
 def ensure_table():
@@ -292,9 +293,11 @@ def ensure_table():
             CREATE TABLE iqc_queue (
                 id                  INT IDENTITY PRIMARY KEY,
                 INVOICE_NO          NVARCHAR(50)  NOT NULL,
-                ITEM_NO             NVARCHAR(50)  NULL,        -- OSA No. (optional, special request)
+                ITEM_NO             NVARCHAR(50)  NULL,
                 MODEL_NAME          NVARCHAR(100) NULL,
                 REV                 NVARCHAR(20)  NULL,
+                MATLOT              NVARCHAR(50)  NULL,
+                LOT_IQC             NVARCHAR(50)  NULL,
                 VISUAL_QTY          INT           NULL,
                 VISUAL_GOOD_QTY     INT           NULL,
                 VISUAL_NG_QTY       INT           NULL,
@@ -310,7 +313,7 @@ def ensure_table():
                 OSA_NO              NVARCHAR(50)  NULL,
                 REMARK              NVARCHAR(MAX) NULL,
                 screen_text         NVARCHAR(MAX) NULL,
-                status              NVARCHAR(30)  NOT NULL DEFAULT 'IQC_WAITING',
+                status              NVARCHAR(30)  NOT NULL DEFAULT 'PENDING_INPUT',
                 error               NVARCHAR(MAX) NULL,
                 created_at          DATETIME2     NOT NULL DEFAULT GETUTCDATE(),
                 updated_at          DATETIME2     NOT NULL DEFAULT GETUTCDATE()
@@ -325,6 +328,8 @@ def ensure_table():
                 ITEM_NO             NVARCHAR(50)  NULL,
                 MODEL_NAME          NVARCHAR(100) NULL,
                 REV                 NVARCHAR(20)  NULL,
+                MATLOT              NVARCHAR(50)  NULL,
+                LOT_IQC             NVARCHAR(50)  NULL,
                 VISUAL_QTY          INT           NULL,
                 VISUAL_GOOD_QTY     INT           NULL,
                 VISUAL_NG_QTY       INT           NULL,
@@ -346,10 +351,53 @@ def ensure_table():
     log.info("DB tables ready (IQC_DB)")
 
 
+def reset_schema():
+    """Drop and recreate iqc_queue + iqc_result. Use once after schema changes."""
+    with _db() as conn:
+        conn.execute("IF OBJECT_ID('iqc_result','U') IS NOT NULL DROP TABLE iqc_result")
+        conn.execute("IF OBJECT_ID('iqc_queue', 'U') IS NOT NULL DROP TABLE iqc_queue")
+        conn.commit()
+    ensure_table()
+    log.info("schema reset complete")
+
+
+def sync_from_inbound():
+    """Pull IQC_WAITING rows from Warehouse_F5.inbound_task into iqc_queue as PENDING_INPUT.
+    Updates inbound_task status to IQC_QUEUED for each pulled row."""
+    with _wh_db() as wh, _db() as iq:
+        rows = wh.execute(
+            "SELECT INVOICE_NO, ITEM_NO, MODEL_NAME, REV, MATLOT "
+            "FROM inbound_task WHERE status='IQC_WAITING'"
+        ).fetchall()
+        inserted = 0
+        for r in rows:
+            exists = iq.execute(
+                "SELECT 1 FROM iqc_queue WHERE INVOICE_NO=? AND ITEM_NO=? "
+                "AND status NOT IN ('IQC_COMPLETE','FAILED')",
+                r[0], r[1]
+            ).fetchone()
+            if not exists:
+                iq.execute(
+                    "INSERT INTO iqc_queue (INVOICE_NO, ITEM_NO, MODEL_NAME, REV, MATLOT) "
+                    "VALUES (?,?,?,?,?)",
+                    r[0], r[1], r[2], r[3], r[4]
+                )
+                wh.execute(
+                    "UPDATE inbound_task SET status='IQC_QUEUED' "
+                    "WHERE INVOICE_NO=? AND ITEM_NO=?",
+                    r[0], r[1]
+                )
+                inserted += 1
+        iq.commit()
+        wh.commit()
+    if inserted:
+        log.info("sync_from_inbound: %d new row(s) added", inserted)
+
+
 def fetch_pending():
     with _db() as conn:
         rows = conn.execute(
-            "SELECT id, INVOICE_NO, ITEM_NO, MODEL_NAME, REV, "
+            "SELECT id, INVOICE_NO, ITEM_NO, MODEL_NAME, REV, MATLOT, LOT_IQC, "
             "       VISUAL_QTY, VISUAL_GOOD_QTY, VISUAL_NG_QTY, VISUAL_RESULT, "
             "       DIM_QTY, DIM_GOOD_QTY, DIM_NG_QTY, DIM_RESULT, "
             "       SKIP_LOT_NO, INSPECTION_TIME, INSPECTION_OPERATOR, AQL_LEVEL, OSA_NO, REMARK "
@@ -361,20 +409,22 @@ def fetch_pending():
         "ITEM_NO":            r[2] or "",
         "MODEL_NAME":         r[3] or "",
         "REV":                r[4] or "",
-        "VISUAL_QTY":         r[5],
-        "VISUAL_GOOD_QTY":    r[6],
-        "VISUAL_NG_QTY":      r[7],
-        "VISUAL_RESULT":      r[8] or "A",
-        "DIM_QTY":            r[9],
-        "DIM_GOOD_QTY":       r[10],
-        "DIM_NG_QTY":         r[11],
-        "DIM_RESULT":         r[12] or "A",
-        "SKIP_LOT_NO":        r[13] or "",
-        "INSPECTION_TIME":    r[14],
-        "INSPECTION_OPERATOR":r[15] or "",
-        "AQL_LEVEL":          r[16] or "",
-        "OSA_NO":             r[17] or "",
-        "REMARK":             r[18] or "",
+        "MATLOT":             r[5] or "",
+        "LOT_IQC":            r[6] or "",
+        "VISUAL_QTY":         r[7],
+        "VISUAL_GOOD_QTY":    r[8],
+        "VISUAL_NG_QTY":      r[9],
+        "VISUAL_RESULT":      r[10] or "A",
+        "DIM_QTY":            r[11],
+        "DIM_GOOD_QTY":       r[12],
+        "DIM_NG_QTY":         r[13],
+        "DIM_RESULT":         r[14] or "A",
+        "SKIP_LOT_NO":        r[15] or "",
+        "INSPECTION_TIME":    r[16],
+        "INSPECTION_OPERATOR":r[17] or "",
+        "AQL_LEVEL":          r[18] or "",
+        "OSA_NO":             r[19] or "",
+        "REMARK":             r[20] or "",
     } for r in rows]
 
 
@@ -391,13 +441,14 @@ def insert_iqc_result(record: dict):
     with _db() as conn:
         conn.execute(
             "INSERT INTO iqc_result "
-            "(queue_id, INVOICE_NO, ITEM_NO, MODEL_NAME, REV, "
+            "(queue_id, INVOICE_NO, ITEM_NO, MODEL_NAME, REV, MATLOT, LOT_IQC, "
             " VISUAL_QTY, VISUAL_GOOD_QTY, VISUAL_NG_QTY, VISUAL_RESULT, "
             " DIM_QTY, DIM_GOOD_QTY, DIM_NG_QTY, DIM_RESULT, "
             " SKIP_LOT_NO, INSPECTION_TIME, INSPECTION_OPERATOR, AQL_LEVEL, OSA_NO, REMARK) "
-            "VALUES (?,?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?,?,?)",
+            "VALUES (?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?,?,?)",
             record["id"], record["INVOICE_NO"], record["ITEM_NO"] or None,
             record["MODEL_NAME"] or None, record["REV"] or None,
+            record["MATLOT"] or None, record["LOT_IQC"] or None,
             record["VISUAL_QTY"], record["VISUAL_GOOD_QTY"], record["VISUAL_NG_QTY"],
             record["VISUAL_RESULT"],
             record["DIM_QTY"], record["DIM_GOOD_QTY"], record["DIM_NG_QTY"],
@@ -636,7 +687,7 @@ def process_record(record: dict):
         input_to_as400(record)
         insert_iqc_result(record)
         mark_done(record["id"], "IQC_COMPLETE", invoice_no=record["INVOICE_NO"])
-        update_warehouse_inbound(record["INVOICE_NO"])
+        update_warehouse_inbound(record["INVOICE_NO"], record["ITEM_NO"])
         log.info("IQC_COMPLETE: %s / %s", record["INVOICE_NO"], record["ITEM_NO"])
     except Exception as e:
         log.error("ERROR: %s / %s — %s", record["INVOICE_NO"], record["ITEM_NO"], e)
@@ -650,6 +701,7 @@ def process_record(record: dict):
 
 
 def poll():
+    sync_from_inbound()
     pending = fetch_pending()
     if not pending:
         log.debug("no pending records")
@@ -659,7 +711,22 @@ def poll():
         process_record(record)
 
 
+def purge_iqc_data():
+    """Truncate iqc_queue and iqc_result; leave user table intact."""
+    with _db() as conn:
+        conn.execute("DELETE FROM iqc_result")
+        conn.execute("DELETE FROM iqc_queue")
+        conn.commit()
+    log.info("purge complete — iqc_queue and iqc_result cleared")
+
+
 def main():
+    if "--reset-schema" in sys.argv:
+        reset_schema()
+        return
+    if "--purge" in sys.argv:
+        purge_iqc_data()
+        return
     init_ehllapi()
     ensure_table()
     ensure_signed_in()
