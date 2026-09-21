@@ -26,6 +26,7 @@ DB_SERVER      = os.getenv("DB_SERVER",     "localhost")
 DB_NAME        = os.getenv("DB_NAME",       "IQC_DB")
 DB_USER        = os.getenv("DB_USER",       "")
 DB_PASSWORD    = os.getenv("DB_PASSWORD",   "")
+WH_DB_NAME     = os.getenv("WH_DB_NAME",    "Warehouse_F5")
 POLL_INTERVAL  = int(os.getenv("POLL_INTERVAL", "5"))
 EHLLAPI_SESSION = os.getenv("EHLLAPI_SESSION", "A")
 DLL_DIR        = os.getenv("DLL_DIR", r"C:\Program Files (x86)\IBM\Client Access\Emulator")
@@ -257,6 +258,31 @@ _CONN_STR = (
 
 def _db():
     return pyodbc.connect(_CONN_STR, autocommit=False)
+
+
+_WH_CONN_STR = (
+    "DRIVER={ODBC Driver 17 for SQL Server};"
+    f"SERVER={DB_SERVER};DATABASE={WH_DB_NAME};"
+    f"UID={DB_USER};PWD={DB_PASSWORD}"
+)
+
+
+def _wh_db():
+    return pyodbc.connect(_WH_CONN_STR, autocommit=False)
+
+
+def update_warehouse_inbound(invoice_no: str):
+    """Best-effort: update inbound_task.status in Warehouse_F5. Logs on failure, never raises."""
+    try:
+        with _wh_db() as conn:
+            rows = conn.execute(
+                "UPDATE inbound_task SET status='IQC_COMPLETE' WHERE INVOICE_NO=?",
+                invoice_no
+            ).rowcount
+            conn.commit()
+        log.info("[WH] inbound_task updated %d row(s) for invoice %s", rows, invoice_no)
+    except Exception as e:
+        log.warning("[WH] warehouse update failed for invoice %s — %s", invoice_no, e)
 
 
 def ensure_table():
@@ -610,6 +636,7 @@ def process_record(record: dict):
         input_to_as400(record)
         insert_iqc_result(record)
         mark_done(record["id"], "IQC_COMPLETE", invoice_no=record["INVOICE_NO"])
+        update_warehouse_inbound(record["INVOICE_NO"])
         log.info("IQC_COMPLETE: %s / %s", record["INVOICE_NO"], record["ITEM_NO"])
     except Exception as e:
         log.error("ERROR: %s / %s — %s", record["INVOICE_NO"], record["ITEM_NO"], e)
