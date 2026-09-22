@@ -296,6 +296,8 @@ def ensure_table():
                 invoiceNo           NVARCHAR(50)  NOT NULL,
                 partNo              NVARCHAR(50)  NULL,
                 partName            NVARCHAR(100) NULL,
+                item_spec           NVARCHAR(100) NULL,
+                item_draw           NVARCHAR(100) NULL,
                 rev                 NVARCHAR(20)  NULL,
                 lotNo               NVARCHAR(50)  NULL,
                 lotIqc              NVARCHAR(50)  NULL,
@@ -334,7 +336,7 @@ def reset_schema():
 def fetch_pending():
     with _db() as conn:
         rows = conn.execute(
-            "SELECT t.id, t.invoice, t.part, t.model, t.rev, t.lotNo, "
+            "SELECT t.id, t.invoice, t.part, t.item_spec, t.item_draw, t.rev, t.lotNo, "
             "       r.lotIqc, r.visualQty, r.visualGoodQty, r.visualNgQty, r.visualResult, "
             "       r.dimQty, r.dimGoodQty, r.dimNgQty, r.dimResult, "
             "       r.skipLotNo, r.inspectionTime, r.inspectionOperator, r.aql, r.osaNо, r.remark "
@@ -347,24 +349,25 @@ def fetch_pending():
         "id":                 r[0],
         "INVOICE_NO":         r[1] or "",
         "ITEM_NO":            r[2] or "",
-        "MODEL_NAME":         r[3] or "",
-        "REV":                r[4] or "",
-        "MATLOT":             r[5] or "",
-        "LOT_IQC":            r[6] or "",
-        "VISUAL_QTY":         r[7],
-        "VISUAL_GOOD_QTY":    r[8],
-        "VISUAL_NG_QTY":      r[9],
-        "VISUAL_RESULT":      r[10] or "A",
-        "DIM_QTY":            r[11],
-        "DIM_GOOD_QTY":       r[12],
-        "DIM_NG_QTY":         r[13],
-        "DIM_RESULT":         r[14] or "A",
-        "SKIP_LOT_NO":        r[15] or "",
-        "INSPECTION_TIME":    r[16],
-        "INSPECTION_OPERATOR":r[17] or "",
-        "AQL_LEVEL":          r[18] or "",
-        "OSA_NO":             r[19] or "",
-        "REMARK":             r[20] or "",
+        "ITEM_SPEC":          r[3] or "",
+        "ITEM_DRAW":          r[4] or "",
+        "REV":                r[5] or "",
+        "MATLOT":             r[6] or "",
+        "LOT_IQC":            r[7] or "",
+        "VISUAL_QTY":         r[8],
+        "VISUAL_GOOD_QTY":    r[9],
+        "VISUAL_NG_QTY":      r[10],
+        "VISUAL_RESULT":      r[11] or "A",
+        "DIM_QTY":            r[12],
+        "DIM_GOOD_QTY":       r[13],
+        "DIM_NG_QTY":         r[14],
+        "DIM_RESULT":         r[15] or "A",
+        "SKIP_LOT_NO":        r[16] or "",
+        "INSPECTION_TIME":    r[17],
+        "INSPECTION_OPERATOR":r[18] or "",
+        "AQL_LEVEL":          r[19] or "",
+        "OSA_NO":             r[20] or "",
+        "REMARK":             r[21] or "",
     } for r in rows]
 
 
