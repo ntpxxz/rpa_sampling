@@ -307,6 +307,7 @@ def ensure_table():
                 dimGoodQty          INT           NULL,
                 dimNgQty            INT           NULL,
                 dimResult           NVARCHAR(1)   NULL,
+                samplingType        NVARCHAR(20)  NULL,
                 skipLotNo           NVARCHAR(50)  NULL,
                 inspectionTime      DATETIME2     NULL,
                 inspectionOperator  NVARCHAR(100) NULL,
